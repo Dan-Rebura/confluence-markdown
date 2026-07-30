@@ -1311,6 +1311,72 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
     return f"Tree publish complete: {published} created, {updated} updated, {errors} errors."
 
 
+# --- Project Sync ---
+
+
+@mcp.tool()
+def sync_project(config_path: str | None = None, confirm: bool = False) -> str:
+    """Sync a project's Markdown files to Confluence using a confluence.json config file.
+
+    Looks for confluence.json in the current working directory (or at config_path).
+    The config specifies the space, docs folder, parent page and Confluence URL.
+
+    Config file format (confluence.json):
+    {
+        "space_key": "ECM",
+        "confluence_url": "https://rebura.atlassian.net",
+        "docs_dir": "Design Documents",
+        "parent_page_id": "1915061323"
+    }
+
+    Defaults to dry-run mode. Set confirm=True to execute.
+
+    Args:
+        config_path: Path to confluence.json. Defaults to ./confluence.json in cwd.
+        confirm: Set to True to execute the sync. Defaults to dry-run.
+    """
+    import json
+
+    # Find config file
+    if config_path:
+        cfg_file = Path(config_path)
+    else:
+        cfg_file = Path.cwd() / "confluence.json"
+
+    if not cfg_file.exists():
+        return (f"Config file not found: {cfg_file}\n"
+                f"Create a confluence.json with: space_key, docs_dir, "
+                f"and optionally confluence_url and parent_page_id.")
+
+    # Load config
+    try:
+        config = json.loads(cfg_file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        return f"Invalid JSON in {cfg_file}: {e}"
+
+    space_key = config.get("space_key")
+    if not space_key:
+        return "Error: confluence.json must have 'space_key' defined."
+
+    docs_dir = config.get("docs_dir", ".")
+    confluence_url = config.get("confluence_url")
+    parent_page_id = config.get("parent_page_id")
+
+    # Resolve docs_dir relative to the config file location
+    docs_path = cfg_file.parent / docs_dir
+    if not docs_path.exists() or not docs_path.is_dir():
+        return f"Error: docs_dir '{docs_dir}' not found at {docs_path}"
+
+    # Delegate to publish_tree
+    return publish_tree(
+        directory_path=str(docs_path),
+        space_key=space_key,
+        parent_page_ref=parent_page_id,
+        confluence_url=confluence_url,
+        confirm=confirm
+    )
+
+
 # --- Entry Point ---
 
 
