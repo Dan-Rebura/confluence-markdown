@@ -298,24 +298,43 @@ def _set_space_homepage(base_url: str, space_key: str, page_id: str) -> bool:
 
 
 def _upload_attachment(base_url: str, page_id: str, file_path: Path) -> bool:
-    """Upload a file as an attachment to a Confluence page."""
+    """Upload a file as an attachment to a Confluence page. Updates if it already exists."""
     url = f"{base_url}/wiki/rest/api/content/{page_id}/child/attachment"
     headers = {"X-Atlassian-Token": "no-check"}
 
     try:
+        # Check if attachment already exists
+        existing = requests.get(
+            url, auth=_get_auth(), params={"filename": file_path.name}, timeout=30
+        )
+        existing_id = None
+        if existing.status_code == 200:
+            results = existing.json().get("results", [])
+            if results:
+                existing_id = results[0].get("id")
+
         with open(file_path, "rb") as f:
-            files = {"file": (file_path.name, f)}
-            response = requests.post(
-                url, auth=_get_auth(), headers=headers,
-                files=files, timeout=60
-            )
+            files = {"file": (file_path.name, f, "application/octet-stream")}
+
+            if existing_id:
+                # Update existing attachment
+                update_url = f"{url}/{existing_id}/data"
+                response = requests.post(
+                    update_url, auth=_get_auth(), headers=headers,
+                    files=files, timeout=60
+                )
+            else:
+                # Create new attachment
+                response = requests.post(
+                    url, auth=_get_auth(), headers=headers,
+                    files=files, timeout=60
+                )
 
         if response.status_code == 429:
             retry_after = int(response.headers.get("Retry-After", 5))
             time.sleep(retry_after)
             return _upload_attachment(base_url, page_id, file_path)
 
-        # 200 = updated existing, 201 = created new
         return response.status_code in (200, 201)
 
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
