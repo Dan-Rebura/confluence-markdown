@@ -1300,10 +1300,45 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
 
             else:
                 # Create new
-                _log(f"Publishing: {page_title}")
                 body, local_images, _ = _prepare_body_for_publish(body, md_file.parent)
                 image_filenames = [Path(ref).name for ref, path in local_images if path]
                 storage_html = _markdown_to_storage(body, image_filenames)
+
+                # Handle homepage flag: update existing homepage instead of creating
+                if metadata.get("confluence_homepage"):
+                    _log(f"Updating homepage: {page_title}")
+                    try:
+                        space_data = _api_get(base_url, f"space/{space_key}", {"expand": "homepage"})
+                        hp_id = space_data.get("homepage", {}).get("id")
+                        if hp_id:
+                            remote = _api_get(base_url, f"content/{hp_id}", {"expand": "version"})
+                            hp_version = remote.get("version", {}).get("number", 1)
+                            payload = {
+                                "type": "page", "title": page_title,
+                                "version": {"number": hp_version + 1},
+                                "body": {"storage": {"value": storage_html, "representation": "storage"}},
+                                "metadata": _FULL_WIDTH_METADATA
+                            }
+                            result = _api_put(base_url, f"content/{hp_id}", json_data=payload)
+                            new_ver = result.get("version", {}).get("number", hp_version + 1)
+
+                            for ref, path in local_images:
+                                if path and path.exists():
+                                    _upload_attachment(base_url, hp_id, path)
+
+                            metadata["confluence_page_id"] = hp_id
+                            metadata["confluence_space_key"] = space_key
+                            metadata["confluence_version"] = new_ver
+                            _write_frontmatter(md_file, metadata, original_body)
+                            updated += 1
+                            time.sleep(0.5)
+                            continue
+                    except Exception as e:
+                        _log(f"ERROR updating homepage: {e}")
+                        errors += 1
+                        continue
+
+                _log(f"Publishing: {page_title}")
 
                 payload = {
                     "type": "page", "title": page_title,
