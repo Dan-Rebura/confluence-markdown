@@ -136,6 +136,41 @@ def _write_frontmatter(file_path: Path, metadata: dict, body: str):
 # --- Markdown to Confluence Storage Format ---
 
 
+def _render_mermaid_blocks(md_text: str, output_dir: Path) -> tuple[str, list[Path]]:
+    """Find ```mermaid code blocks, render each to PNG via mmdc, and replace
+    with image references. Returns (modified_md, list_of_png_paths)."""
+    import subprocess as sp
+
+    pattern = re.compile(r"```mermaid\s*\n(.*?)```", re.DOTALL)
+    images: list[Path] = []
+    counter = [0]
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    def replace_block(match):
+        mermaid_code = match.group(1)
+        counter[0] += 1
+        mmd_file = output_dir / f"mermaid_{counter[0]}.mmd"
+        png_file = output_dir / f"mermaid_{counter[0]}.png"
+
+        mmd_file.write_text(mermaid_code, encoding="utf-8")
+
+        try:
+            sp.run(
+                ["mmdc", "-i", str(mmd_file), "-o", str(png_file), "-b", "transparent", "-s", "2"],
+                check=True, capture_output=True, shell=True
+            )
+            images.append(png_file)
+            return f"![Diagram {counter[0]}]({png_file.name})"
+        except FileNotFoundError:
+            return match.group(0)  # Leave as-is if mmdc not installed
+        except sp.CalledProcessError:
+            return match.group(0)  # Leave as-is if render fails
+
+    result = pattern.sub(replace_block, md_text)
+    return result, images
+
+
 def _find_local_images(md_text: str, base_dir: Path) -> list[tuple[str, Path | None]]:
     """Find image references in markdown. Returns list of (ref, resolved_path_or_None)."""
     pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
@@ -147,6 +182,30 @@ def _find_local_images(md_text: str, base_dir: Path) -> list[tuple[str, Path | N
         resolved = base_dir / ref
         images.append((ref, resolved if resolved.exists() else None))
     return images
+
+
+def _prepare_body_for_publish(body: str, file_dir: Path, temp_dir: Path | None = None) -> tuple[str, list[tuple[str, Path | None]], list[Path]]:
+    """Render mermaid diagrams and find local images.
+    Returns (processed_body, local_images_list, mermaid_png_paths)."""
+    import tempfile
+
+    if temp_dir is None:
+        temp_dir = Path(tempfile.mkdtemp(prefix="confluence_mermaid_"))
+
+    # Render mermaid blocks to PNGs
+    processed_body, mermaid_pngs = _render_mermaid_blocks(body, temp_dir)
+
+    # Find all local image references (including the newly created mermaid PNGs)
+    local_images = _find_local_images(processed_body, file_dir)
+
+    # Also add mermaid PNGs that are referenced by filename only (in temp dir)
+    for png_path in mermaid_pngs:
+        # Check if already in local_images
+        already_found = any(png_path.name in ref for ref, _ in local_images)
+        if not already_found:
+            local_images.append((png_path.name, png_path))
+
+    return processed_body, local_images, mermaid_pngs
 
 
 def _markdown_to_storage(md_text: str, local_image_filenames: list[str] | None = None) -> str:
@@ -739,8 +798,8 @@ def publish_page(file_path: str, space_key: str | None = None, parent_page_ref: 
         except requests.exceptions.HTTPError as e:
             return f"Error fetching space: {e}"
 
-        # Find local images and convert
-        local_images = _find_local_images(body, fp.parent)
+        # Render mermaid diagrams and find local images
+        body, local_images, _mermaid_pngs = _prepare_body_for_publish(body, fp.parent)
         image_filenames = [Path(ref).name for ref, path in local_images if path]
         missing_images = [ref for ref, path in local_images if path is None]
         storage_html = _markdown_to_storage(body, image_filenames)
@@ -810,8 +869,8 @@ def publish_page(file_path: str, space_key: str | None = None, parent_page_ref: 
     if not target_space:
         return "Error: No space_key provided and confluence_space_key not in frontmatter."
 
-    # Find local images
-    local_images = _find_local_images(body, fp.parent)
+    # Render mermaid diagrams and find local images
+    body, local_images, _mermaid_pngs = _prepare_body_for_publish(body, fp.parent)
     image_filenames = [Path(ref).name for ref, path in local_images if path]
     missing_images = [ref for ref, path in local_images if path is None]
 
@@ -936,8 +995,8 @@ def update_page(file_path: str, page_ref: str | None = None, title: str | None =
                 f"remote has version {remote_version}. "
                 f"Download the latest version before updating.")
 
-    # Find local images
-    local_images = _find_local_images(body, fp.parent)
+    # Render mermaid diagrams and find local images
+    body, local_images, _mermaid_pngs = _prepare_body_for_publish(body, fp.parent)
     image_filenames = [Path(ref).name for ref, path in local_images if path]
     missing_images = [ref for ref, path in local_images if path is None]
 
@@ -1165,7 +1224,7 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
                 remote = _api_get(base_url, f"content/{page_id}", {"expand": "version"})
                 remote_version = remote.get("version", {}).get("number", 0)
 
-                local_images = _find_local_images(body, md_file.parent)
+                body, local_images, _ = _prepare_body_for_publish(body, md_file.parent)
                 image_filenames = [Path(ref).name for ref, path in local_images if path]
                 storage_html = _markdown_to_storage(body, image_filenames)
 
@@ -1188,7 +1247,7 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
 
             else:
                 # Create new
-                local_images = _find_local_images(body, md_file.parent)
+                body, local_images, _ = _prepare_body_for_publish(body, md_file.parent)
                 image_filenames = [Path(ref).name for ref, path in local_images if path]
                 storage_html = _markdown_to_storage(body, image_filenames)
 
