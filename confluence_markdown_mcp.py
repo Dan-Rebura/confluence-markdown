@@ -157,7 +157,7 @@ def _render_mermaid_blocks(md_text: str, output_dir: Path) -> tuple[str, list[Pa
 
         try:
             sp.run(
-                ["mmdc", "-i", str(mmd_file), "-o", str(png_file), "-b", "transparent", "-s", "2"],
+                ["mmdc", "-i", str(mmd_file), "-o", str(png_file), "-b", "transparent", "-s", "4"],
                 check=True, capture_output=True, shell=True
             )
             images.append(png_file)
