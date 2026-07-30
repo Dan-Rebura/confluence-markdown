@@ -1145,7 +1145,11 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
     # Discover all .md files, excluding specified directories
     md_files = sorted(
         f for f in root_dir.rglob("*.md")
-        if not any(part in excluded for part in f.relative_to(root_dir).parts)
+        if not any(
+            str(f.relative_to(root_dir)).startswith(ex) or
+            str(f.relative_to(root_dir)).startswith(ex.replace("/", "\\"))
+            for ex in excluded
+        )
     )
     if not md_files:
         return f"No Markdown files found in {directory_path}"
