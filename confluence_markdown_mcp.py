@@ -1143,12 +1143,13 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
         return f"Directory not found: {directory_path}"
 
     # Discover all .md files, excluding specified directories
+    # Normalise separators so config works on both Windows and Mac
+    normalised_excludes = [ex.replace("\\", "/") for ex in excluded]
     md_files = sorted(
         f for f in root_dir.rglob("*.md")
         if not any(
-            str(f.relative_to(root_dir)).startswith(ex) or
-            str(f.relative_to(root_dir)).startswith(ex.replace("/", "\\"))
-            for ex in excluded
+            str(f.relative_to(root_dir)).replace("\\", "/").startswith(ex)
+            for ex in normalised_excludes
         )
     )
     if not md_files:
