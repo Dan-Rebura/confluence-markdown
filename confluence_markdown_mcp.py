@@ -1121,7 +1121,8 @@ def update_page(file_path: str, page_ref: str | None = None, title: str | None =
 
 @mcp.tool()
 def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | None = None,
-                 confluence_url: str | None = None, confirm: bool = False) -> str:
+                 confluence_url: str | None = None, confirm: bool = False,
+                 exclude_dirs: list[str] | None = None) -> str:
     """Publish a directory of Markdown files as a hierarchy of Confluence pages.
 
     Folder structure maps to page hierarchy. Defaults to dry-run mode.
@@ -1132,15 +1133,20 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
         parent_page_ref: Parent page URL or ID for the root level. Optional.
         confluence_url: Confluence base URL. Falls back to env if not provided.
         confirm: Set to True to execute. Defaults to dry-run.
+        exclude_dirs: List of folder names to exclude from sync.
     """
     base_url = _resolve_url(confluence_url)
     root_dir = Path(directory_path)
+    excluded = set(exclude_dirs or [])
 
     if not root_dir.exists() or not root_dir.is_dir():
         return f"Directory not found: {directory_path}"
 
-    # Discover all .md files
-    md_files = sorted(root_dir.rglob("*.md"))
+    # Discover all .md files, excluding specified directories
+    md_files = sorted(
+        f for f in root_dir.rglob("*.md")
+        if not any(part in excluded for part in f.relative_to(root_dir).parts)
+    )
     if not md_files:
         return f"No Markdown files found in {directory_path}"
 
@@ -1425,13 +1431,14 @@ def sync_project(config_path: str | None = None, confirm: bool = False) -> str:
     docs_dir = config.get("docs_dir", ".")
     confluence_url = config.get("confluence_url")
     parent_page_id = config.get("parent_page_id")
+    exclude_dirs = config.get("exclude_dirs", [])
 
     # Resolve docs_dir relative to the config file location
     docs_path = cfg_file.parent / docs_dir
     if not docs_path.exists() or not docs_path.is_dir():
         return f"Error: docs_dir '{docs_dir}' not found at {docs_path}"
 
-    _log(f"Syncing: space={space_key}, docs={docs_path}, parent={parent_page_id or 'root'}")
+    _log(f"Syncing: space={space_key}, docs={docs_path}, parent={parent_page_id or 'root'}, excludes={exclude_dirs}")
 
     # Delegate to publish_tree
     return publish_tree(
@@ -1439,7 +1446,8 @@ def sync_project(config_path: str | None = None, confirm: bool = False) -> str:
         space_key=space_key,
         parent_page_ref=parent_page_id,
         confluence_url=confluence_url,
-        confirm=confirm
+        confirm=confirm,
+        exclude_dirs=exclude_dirs
     )
 
 
