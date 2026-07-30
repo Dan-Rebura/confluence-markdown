@@ -166,7 +166,7 @@ def _render_mermaid_blocks(md_text: str, output_dir: Path) -> tuple[str, list[Pa
             # Use .cmd extension on Windows for npm-installed commands
             mmdc_cmd = "mmdc.cmd" if os.name == "nt" else "mmdc"
             proc = sp.Popen(
-                [mmdc_cmd, "-i", str(mmd_file), "-o", str(png_file), "-b", "white", "-s", "4"],
+                [mmdc_cmd, "-i", str(mmd_file), "-o", str(png_file), "-b", "white", "-s", "2"],
                 stdout=sp.PIPE, stderr=sp.PIPE
             )
             try:
