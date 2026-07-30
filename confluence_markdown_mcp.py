@@ -195,14 +195,18 @@ def _prepare_body_for_publish(body: str, file_dir: Path, temp_dir: Path | None =
     # Render mermaid blocks to PNGs
     processed_body, mermaid_pngs = _render_mermaid_blocks(body, temp_dir)
 
-    # Find all local image references (including the newly created mermaid PNGs)
+    # Find all local image references
     local_images = _find_local_images(processed_body, file_dir)
 
-    # Also add mermaid PNGs that are referenced by filename only (in temp dir)
+    # Replace mermaid refs that resolved to None with the actual temp dir paths
     for png_path in mermaid_pngs:
-        # Check if already in local_images
-        already_found = any(png_path.name in ref for ref, _ in local_images)
-        if not already_found:
+        # Find and replace the entry with None path
+        for i, (ref, path) in enumerate(local_images):
+            if png_path.name in ref and path is None:
+                local_images[i] = (ref, png_path)
+                break
+        else:
+            # Not found at all, add it
             local_images.append((png_path.name, png_path))
 
     return processed_body, local_images, mermaid_pngs
