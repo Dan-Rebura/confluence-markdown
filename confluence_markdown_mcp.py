@@ -222,6 +222,18 @@ _FULL_WIDTH_METADATA = {
 }
 
 
+def _set_space_homepage(base_url: str, space_key: str, page_id: str) -> bool:
+    """Set a page as the space homepage."""
+    try:
+        _api_put(base_url, f"space/{space_key}", json_data={
+            "key": space_key,
+            "homepage": {"id": page_id}
+        })
+        return True
+    except Exception:
+        return False
+
+
 def _upload_attachment(base_url: str, page_id: str, file_path: Path) -> bool:
     """Upload a file as an attachment to a Confluence page."""
     url = f"{base_url}/wiki/rest/api/content/{page_id}/child/attachment"
@@ -777,6 +789,11 @@ def publish_page(file_path: str, space_key: str | None = None, parent_page_ref: 
         metadata["confluence_parent_id"] = parent_id
     _write_frontmatter(fp, metadata, body)
 
+    # Set as homepage if flagged
+    homepage_set = False
+    if metadata.get("confluence_homepage"):
+        homepage_set = _set_space_homepage(base_url, target_space, new_page_id)
+
     lines = [
         f"Published: {page_title}",
         f"  Page ID: {new_page_id}",
@@ -784,6 +801,8 @@ def publish_page(file_path: str, space_key: str | None = None, parent_page_ref: 
         f"  Version: {new_version}",
         f"  Images uploaded: {uploaded}/{len(image_filenames)}",
     ]
+    if homepage_set:
+        lines.append(f"  Homepage: set as space homepage for {target_space}")
     if missing_images:
         lines.append(f"  WARNING - missing images: {missing_images}")
     return "\n".join(lines)
@@ -904,6 +923,11 @@ def update_page(file_path: str, page_ref: str | None = None, title: str | None =
     metadata["source"] = page_url
     _write_frontmatter(fp, metadata, body)
 
+    # Set as homepage if flagged
+    homepage_set = False
+    if metadata.get("confluence_homepage"):
+        homepage_set = _set_space_homepage(base_url, space_key, page_id)
+
     lines = [
         f"Updated: {page_title}",
         f"  Page ID: {page_id}",
@@ -911,6 +935,8 @@ def update_page(file_path: str, page_ref: str | None = None, title: str | None =
         f"  Version: {remote_version} -> {actual_version}",
         f"  Images uploaded: {uploaded}/{len(image_filenames)}",
     ]
+    if homepage_set:
+        lines.append(f"  Homepage: set as space homepage for {space_key}")
     if missing_images:
         lines.append(f"  WARNING - missing images: {missing_images}")
     return "\n".join(lines)
