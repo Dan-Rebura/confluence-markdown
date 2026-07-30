@@ -1,0 +1,7 @@
+.env
+confluence-export/
+dist/
+*.egg-info/
+__pycache__/
+*.pyc
+.venv/
