@@ -724,6 +724,88 @@ def publish_page(file_path: str, space_key: str | None = None, parent_page_ref: 
         return (f"This file already has confluence_page_id={metadata['confluence_page_id']}. "
                 f"Use update_page instead to update the existing page.")
 
+    # If flagged as homepage, update the space's existing homepage instead of creating new
+    if metadata.get("confluence_homepage"):
+        if not target_space:
+            return "Error: No space_key provided and confluence_space_key not in frontmatter."
+
+        # Fetch the space's current homepage
+        try:
+            space_data = _api_get(base_url, f"space/{target_space}", {"expand": "homepage"})
+            hp = space_data.get("homepage", {})
+            hp_id = hp.get("id")
+            if not hp_id:
+                return f"Error: Space {target_space} has no homepage set."
+        except requests.exceptions.HTTPError as e:
+            return f"Error fetching space: {e}"
+
+        # Find local images and convert
+        local_images = _find_local_images(body, fp.parent)
+        image_filenames = [Path(ref).name for ref, path in local_images if path]
+        missing_images = [ref for ref, path in local_images if path is None]
+        storage_html = _markdown_to_storage(body, image_filenames)
+
+        if not confirm:
+            lines = [
+                "DRY RUN - publish_page (homepage update) preview:",
+                f"  Will update existing homepage: {hp.get('title')} (id: {hp_id})",
+                f"  Space: {target_space}",
+                f"  New title: {page_title}",
+                f"  Content: {len(storage_html)} chars of storage HTML",
+                f"  Images: {len(image_filenames)} to upload",
+            ]
+            if missing_images:
+                lines.append(f"  WARNING - missing images: {missing_images}")
+            lines.append("")
+            lines.append("Set confirm=True to execute this update.")
+            return "\n".join(lines)
+
+        # Fetch current version
+        remote = _api_get(base_url, f"content/{hp_id}", {"expand": "version"})
+        remote_version = remote.get("version", {}).get("number", 1)
+
+        payload = {
+            "type": "page",
+            "title": page_title,
+            "version": {"number": remote_version + 1},
+            "body": {"storage": {"value": storage_html, "representation": "storage"}},
+            "metadata": _FULL_WIDTH_METADATA
+        }
+
+        try:
+            result = _api_put(base_url, f"content/{hp_id}", json_data=payload)
+        except requests.exceptions.HTTPError as e:
+            return f"Failed to update homepage: {e}"
+
+        actual_version = result.get("version", {}).get("number", remote_version + 1)
+        page_url = f"{base_url}/wiki/spaces/{target_space}/pages/{hp_id}"
+
+        # Upload images
+        uploaded = 0
+        for ref, path in local_images:
+            if path and path.exists():
+                if _upload_attachment(base_url, hp_id, path):
+                    uploaded += 1
+                time.sleep(0.3)
+
+        # Update local frontmatter
+        metadata["confluence_page_id"] = hp_id
+        metadata["confluence_space_key"] = target_space
+        metadata["confluence_version"] = actual_version
+        metadata["source"] = page_url
+        _write_frontmatter(fp, metadata, body)
+
+        lines = [
+            f"Homepage updated: {page_title}",
+            f"  Page ID: {hp_id}",
+            f"  URL: {page_url}",
+            f"  Version: {remote_version} -> {actual_version}",
+            f"  Images uploaded: {uploaded}/{len(image_filenames)}",
+        ]
+        if missing_images:
+            lines.append(f"  WARNING - missing images: {missing_images}")
+        return "\n".join(lines)
+
     # Validate
     if not target_space:
         return "Error: No space_key provided and confluence_space_key not in frontmatter."
@@ -789,11 +871,6 @@ def publish_page(file_path: str, space_key: str | None = None, parent_page_ref: 
         metadata["confluence_parent_id"] = parent_id
     _write_frontmatter(fp, metadata, body)
 
-    # Set as homepage if flagged
-    homepage_set = False
-    if metadata.get("confluence_homepage"):
-        homepage_set = _set_space_homepage(base_url, target_space, new_page_id)
-
     lines = [
         f"Published: {page_title}",
         f"  Page ID: {new_page_id}",
@@ -801,8 +878,6 @@ def publish_page(file_path: str, space_key: str | None = None, parent_page_ref: 
         f"  Version: {new_version}",
         f"  Images uploaded: {uploaded}/{len(image_filenames)}",
     ]
-    if homepage_set:
-        lines.append(f"  Homepage: set as space homepage for {target_space}")
     if missing_images:
         lines.append(f"  WARNING - missing images: {missing_images}")
     return "\n".join(lines)
@@ -923,11 +998,6 @@ def update_page(file_path: str, page_ref: str | None = None, title: str | None =
     metadata["source"] = page_url
     _write_frontmatter(fp, metadata, body)
 
-    # Set as homepage if flagged
-    homepage_set = False
-    if metadata.get("confluence_homepage"):
-        homepage_set = _set_space_homepage(base_url, space_key, page_id)
-
     lines = [
         f"Updated: {page_title}",
         f"  Page ID: {page_id}",
@@ -935,8 +1005,6 @@ def update_page(file_path: str, page_ref: str | None = None, title: str | None =
         f"  Version: {remote_version} -> {actual_version}",
         f"  Images uploaded: {uploaded}/{len(image_filenames)}",
     ]
-    if homepage_set:
-        lines.append(f"  Homepage: set as space homepage for {space_key}")
     if missing_images:
         lines.append(f"  WARNING - missing images: {missing_images}")
     return "\n".join(lines)
