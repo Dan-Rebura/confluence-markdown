@@ -156,15 +156,17 @@ def _render_mermaid_blocks(md_text: str, output_dir: Path) -> tuple[str, list[Pa
         mmd_file.write_text(mermaid_code, encoding="utf-8")
 
         try:
+            # Use .cmd extension on Windows for npm-installed commands
+            mmdc_cmd = "mmdc.cmd" if os.name == "nt" else "mmdc"
             sp.run(
-                ["mmdc", "-i", str(mmd_file), "-o", str(png_file), "-b", "transparent", "-s", "4"],
-                check=True, capture_output=True, shell=True
+                [mmdc_cmd, "-i", str(mmd_file), "-o", str(png_file), "-b", "transparent", "-s", "4"],
+                check=True, capture_output=True, timeout=30
             )
             images.append(png_file)
             return f"![Diagram {counter[0]}]({png_file.name})"
         except FileNotFoundError:
             return match.group(0)  # Leave as-is if mmdc not installed
-        except sp.CalledProcessError:
+        except (sp.CalledProcessError, sp.TimeoutExpired):
             return match.group(0)  # Leave as-is if render fails
 
     result = pattern.sub(replace_block, md_text)
