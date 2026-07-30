@@ -802,7 +802,8 @@ def publish_page(file_path: str, space_key: str | None = None, parent_page_ref: 
         except requests.exceptions.HTTPError as e:
             return f"Error fetching space: {e}"
 
-        # Render mermaid diagrams and find local images
+        # Render mermaid diagrams and find local images (keep original body for file write-back)
+        original_body = body
         body, local_images, _mermaid_pngs = _prepare_body_for_publish(body, fp.parent)
         image_filenames = [Path(ref).name for ref, path in local_images if path]
         missing_images = [ref for ref, path in local_images if path is None]
@@ -856,7 +857,7 @@ def publish_page(file_path: str, space_key: str | None = None, parent_page_ref: 
         metadata["confluence_space_key"] = target_space
         metadata["confluence_version"] = actual_version
         metadata["source"] = page_url
-        _write_frontmatter(fp, metadata, body)
+        _write_frontmatter(fp, metadata, original_body)
 
         lines = [
             f"Homepage updated: {page_title}",
@@ -873,7 +874,8 @@ def publish_page(file_path: str, space_key: str | None = None, parent_page_ref: 
     if not target_space:
         return "Error: No space_key provided and confluence_space_key not in frontmatter."
 
-    # Render mermaid diagrams and find local images
+    # Render mermaid diagrams and find local images (keep original body for file write-back)
+    original_body = body
     body, local_images, _mermaid_pngs = _prepare_body_for_publish(body, fp.parent)
     image_filenames = [Path(ref).name for ref, path in local_images if path]
     missing_images = [ref for ref, path in local_images if path is None]
@@ -932,7 +934,7 @@ def publish_page(file_path: str, space_key: str | None = None, parent_page_ref: 
     metadata["source"] = page_url
     if parent_id:
         metadata["confluence_parent_id"] = parent_id
-    _write_frontmatter(fp, metadata, body)
+    _write_frontmatter(fp, metadata, original_body)
 
     lines = [
         f"Published: {page_title}",
@@ -999,7 +1001,8 @@ def update_page(file_path: str, page_ref: str | None = None, title: str | None =
                 f"remote has version {remote_version}. "
                 f"Download the latest version before updating.")
 
-    # Render mermaid diagrams and find local images
+    # Render mermaid diagrams and find local images (keep original body for file write-back)
+    original_body = body
     body, local_images, _mermaid_pngs = _prepare_body_for_publish(body, fp.parent)
     image_filenames = [Path(ref).name for ref, path in local_images if path]
     missing_images = [ref for ref, path in local_images if path is None]
@@ -1059,7 +1062,7 @@ def update_page(file_path: str, page_ref: str | None = None, title: str | None =
     metadata["confluence_version"] = actual_version
     metadata["confluence_space_key"] = space_key
     metadata["source"] = page_url
-    _write_frontmatter(fp, metadata, body)
+    _write_frontmatter(fp, metadata, original_body)
 
     lines = [
         f"Updated: {page_title}",
@@ -1214,6 +1217,7 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
     # Second pass: publish/update each markdown file under its folder's parent page
     for md_file in md_files:
         metadata, body = _parse_markdown_file(md_file)
+        original_body = body
         rel_path = md_file.relative_to(root_dir)
         page_title = metadata.get("title") or md_file.stem
         rel_dir = str(rel_path.parent)
@@ -1246,7 +1250,7 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
                         _upload_attachment(base_url, page_id, path)
 
                 metadata["confluence_version"] = new_ver
-                _write_frontmatter(md_file, metadata, body)
+                _write_frontmatter(md_file, metadata, original_body)
                 updated += 1
 
             else:
@@ -1277,7 +1281,7 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
                 metadata["confluence_version"] = new_ver
                 if file_parent_id:
                     metadata["confluence_parent_id"] = file_parent_id
-                _write_frontmatter(md_file, metadata, body)
+                _write_frontmatter(md_file, metadata, original_body)
                 published += 1
 
             time.sleep(0.5)
