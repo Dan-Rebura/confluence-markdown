@@ -214,6 +214,14 @@ def _markdown_to_storage(md_text: str, local_image_filenames: list[str] | None =
 # --- Attachment Upload ---
 
 
+_FULL_WIDTH_METADATA = {
+    "properties": {
+        "content-appearance-draft": {"value": "full-width"},
+        "content-appearance-published": {"value": "full-width"}
+    }
+}
+
+
 def _upload_attachment(base_url: str, page_id: str, file_path: Path) -> bool:
     """Upload a file as an attachment to a Confluence page."""
     url = f"{base_url}/wiki/rest/api/content/{page_id}/child/attachment"
@@ -737,7 +745,8 @@ def publish_page(file_path: str, space_key: str | None = None, parent_page_ref: 
         "type": "page",
         "title": page_title,
         "space": {"key": target_space},
-        "body": {"storage": {"value": storage_html, "representation": "storage"}}
+        "body": {"storage": {"value": storage_html, "representation": "storage"}},
+        "metadata": _FULL_WIDTH_METADATA
     }
     if parent_id:
         payload["ancestors"] = [{"id": parent_id}]
@@ -865,7 +874,8 @@ def update_page(file_path: str, page_ref: str | None = None, title: str | None =
         "type": "page",
         "title": page_title,
         "version": {"number": new_version},
-        "body": {"storage": {"value": storage_html, "representation": "storage"}}
+        "body": {"storage": {"value": storage_html, "representation": "storage"}},
+        "metadata": _FULL_WIDTH_METADATA
     }
 
     try:
@@ -935,6 +945,13 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
     if parent_page_ref:
         parent_id = _extract_page_id(parent_page_ref) or parent_page_ref
 
+    # Identify subfolders that will become parent pages
+    subdirs = sorted(set(
+        str(md_file.relative_to(root_dir).parent)
+        for md_file in md_files
+        if str(md_file.relative_to(root_dir).parent) != "."
+    ))
+
     # Build tree structure for reporting
     creates = []
     updates = []
@@ -957,11 +974,17 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
             f"  Space: {space_key}",
             f"  Parent: {parent_id or '(space root)'}",
             f"  Total files: {len(md_files)}",
-            f"  To create: {len(creates)}",
-            f"  To update: {len(updates)}",
-            "",
-            "Creates:"
+            f"  Folder pages to create: {len(subdirs)}",
+            f"  File pages to create: {len(creates)}",
+            f"  File pages to update: {len(updates)}",
         ]
+        if subdirs:
+            lines.append("")
+            lines.append("Folder parent pages:")
+            for sd in subdirs:
+                lines.append(f"    [folder] {sd}")
+        lines.append("")
+        lines.append("Creates:")
         for c in creates[:20]:
             lines.append(f"    + {c['file']} -> \"{c['title']}\"")
         if len(creates) > 20:
@@ -980,19 +1003,66 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
     published = 0
     updated = 0
     errors = 0
-    # Track created pages by relative directory for parent resolution
+    # Track page IDs by relative directory path for parent resolution
     dir_page_map: dict[str, str] = {}
     if parent_id:
         dir_page_map["."] = parent_id
 
+    # First pass: create parent pages for each subfolder
+    subdirs = sorted(set(
+        str(md_file.relative_to(root_dir).parent)
+        for md_file in md_files
+        if str(md_file.relative_to(root_dir).parent) != "."
+    ))
+
+    for subdir in subdirs:
+        parts = Path(subdir).parts
+        # Build each level of the path, creating parent pages as needed
+        for i in range(len(parts)):
+            dir_key = str(Path(*parts[:i+1]))
+            if dir_key in dir_page_map:
+                continue  # Already created
+
+            folder_name = parts[i]
+            # Determine this folder's parent
+            if i == 0:
+                folder_parent_id = dir_page_map.get(".", parent_id)
+            else:
+                parent_dir_key = str(Path(*parts[:i]))
+                folder_parent_id = dir_page_map.get(parent_dir_key, parent_id)
+
+            # Create a parent page for this folder
+            folder_payload = {
+                "type": "page",
+                "title": folder_name,
+                "space": {"key": space_key},
+                "body": {"storage": {
+                    "value": f"<p>This page contains sub-pages for: <strong>{folder_name}</strong></p>",
+                    "representation": "storage"
+                }},
+                "metadata": _FULL_WIDTH_METADATA
+            }
+            if folder_parent_id:
+                folder_payload["ancestors"] = [{"id": folder_parent_id}]
+
+            try:
+                result = _api_post(base_url, "content", json_data=folder_payload)
+                folder_page_id = result.get("id")
+                dir_page_map[dir_key] = folder_page_id
+                published += 1
+                time.sleep(0.5)
+            except Exception:
+                errors += 1
+
+    # Second pass: publish/update each markdown file under its folder's parent page
     for md_file in md_files:
         metadata, body = _parse_markdown_file(md_file)
         rel_path = md_file.relative_to(root_dir)
         page_title = metadata.get("title") or md_file.stem
         rel_dir = str(rel_path.parent)
 
-        # Determine parent for this file
-        file_parent_id = dir_page_map.get(rel_dir, parent_id)
+        # Determine parent: use the folder's page, or the root parent
+        file_parent_id = dir_page_map.get(rel_dir, dir_page_map.get(".", parent_id))
 
         try:
             if metadata.get("confluence_page_id"):
@@ -1008,12 +1078,12 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
                 payload = {
                     "type": "page", "title": page_title,
                     "version": {"number": remote_version + 1},
-                    "body": {"storage": {"value": storage_html, "representation": "storage"}}
+                    "body": {"storage": {"value": storage_html, "representation": "storage"}},
+                    "metadata": _FULL_WIDTH_METADATA
                 }
                 result = _api_put(base_url, f"content/{page_id}", json_data=payload)
                 new_ver = result.get("version", {}).get("number", remote_version + 1)
 
-                # Upload images
                 for ref, path in local_images:
                     if path and path.exists():
                         _upload_attachment(base_url, page_id, path)
@@ -1021,7 +1091,6 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
                 metadata["confluence_version"] = new_ver
                 _write_frontmatter(md_file, metadata, body)
                 updated += 1
-                dir_page_map[str(rel_path.with_suffix(""))] = page_id
 
             else:
                 # Create new
@@ -1032,7 +1101,8 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
                 payload = {
                     "type": "page", "title": page_title,
                     "space": {"key": space_key},
-                    "body": {"storage": {"value": storage_html, "representation": "storage"}}
+                    "body": {"storage": {"value": storage_html, "representation": "storage"}},
+                    "metadata": _FULL_WIDTH_METADATA
                 }
                 if file_parent_id:
                     payload["ancestors"] = [{"id": file_parent_id}]
@@ -1041,7 +1111,6 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
                 new_page_id = result.get("id")
                 new_ver = result.get("version", {}).get("number", 1)
 
-                # Upload images
                 for ref, path in local_images:
                     if path and path.exists():
                         _upload_attachment(base_url, new_page_id, path)
@@ -1053,9 +1122,6 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
                     metadata["confluence_parent_id"] = file_parent_id
                 _write_frontmatter(md_file, metadata, body)
                 published += 1
-
-                # Register this page as potential parent
-                dir_page_map[str(rel_path.with_suffix(""))] = new_page_id
 
             time.sleep(0.5)
 
