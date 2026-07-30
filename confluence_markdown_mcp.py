@@ -10,6 +10,7 @@ CONFLUENCE_URL can be overridden per tool call for multi-org access.
 
 import os
 import re
+import sys
 import time
 from pathlib import Path
 from urllib.parse import urlparse, unquote
@@ -20,6 +21,11 @@ import requests
 from dotenv import load_dotenv
 from markdownify import markdownify as md_convert
 from mcp.server.fastmcp import FastMCP
+
+
+def _log(msg: str):
+    """Log to stderr (visible in Kiro MCP output window)."""
+    print(f"[confluence-markdown] {msg}", file=sys.stderr, flush=True)
 
 # Load .env if present (fallback if env vars not set by Kiro)
 _script_dir = Path(__file__).parent
@@ -154,6 +160,7 @@ def _render_mermaid_blocks(md_text: str, output_dir: Path) -> tuple[str, list[Pa
         png_file = output_dir / f"mermaid_{counter[0]}.png"
 
         mmd_file.write_text(mermaid_code, encoding="utf-8")
+        _log(f"Rendering mermaid diagram {counter[0]}...")
 
         try:
             # Use .cmd extension on Windows for npm-installed commands
@@ -162,12 +169,15 @@ def _render_mermaid_blocks(md_text: str, output_dir: Path) -> tuple[str, list[Pa
                 [mmdc_cmd, "-i", str(mmd_file), "-o", str(png_file), "-b", "transparent", "-s", "4"],
                 check=True, capture_output=True, timeout=30
             )
+            _log(f"Mermaid diagram {counter[0]} rendered: {png_file.stat().st_size} bytes")
             images.append(png_file)
             return f"![Diagram {counter[0]}]({png_file.name})"
         except FileNotFoundError:
-            return match.group(0)  # Leave as-is if mmdc not installed
-        except (sp.CalledProcessError, sp.TimeoutExpired):
-            return match.group(0)  # Leave as-is if render fails
+            _log(f"mmdc not found - skipping mermaid diagram {counter[0]}")
+            return match.group(0)
+        except (sp.CalledProcessError, sp.TimeoutExpired) as e:
+            _log(f"Mermaid render failed for diagram {counter[0]}: {e}")
+            return match.group(0)
 
     result = pattern.sub(replace_block, md_text)
     return result, images
@@ -1213,6 +1223,7 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
                 folder_parent_id = dir_page_map.get(parent_dir_key, parent_id)
 
             # Create a parent page for this folder
+            _log(f"Creating folder page: {folder_name}")
             folder_payload = {
                 "type": "page",
                 "title": folder_name,
@@ -1250,6 +1261,7 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
             if metadata.get("confluence_page_id"):
                 # Update existing
                 page_id = str(metadata["confluence_page_id"])
+                _log(f"Updating: {page_title} (id: {page_id})")
                 remote = _api_get(base_url, f"content/{page_id}", {"expand": "version"})
                 remote_version = remote.get("version", {}).get("number", 0)
 
@@ -1276,6 +1288,7 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
 
             else:
                 # Create new
+                _log(f"Publishing: {page_title}")
                 body, local_images, _ = _prepare_body_for_publish(body, md_file.parent)
                 image_filenames = [Path(ref).name for ref, path in local_images if path]
                 storage_html = _markdown_to_storage(body, image_filenames)
@@ -1309,7 +1322,9 @@ def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | Non
 
         except Exception as e:
             errors += 1
+            _log(f"ERROR: {page_title} - {e}")
 
+    _log(f"Tree complete: {published} created, {updated} updated, {errors} errors")
     return f"Tree publish complete: {published} created, {updated} updated, {errors} errors."
 
 
@@ -1368,6 +1383,8 @@ def sync_project(config_path: str | None = None, confirm: bool = False) -> str:
     docs_path = cfg_file.parent / docs_dir
     if not docs_path.exists() or not docs_path.is_dir():
         return f"Error: docs_dir '{docs_dir}' not found at {docs_path}"
+
+    _log(f"Syncing: space={space_key}, docs={docs_path}, parent={parent_page_id or 'root'}")
 
     # Delegate to publish_tree
     return publish_tree(
