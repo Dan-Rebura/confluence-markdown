@@ -165,18 +165,30 @@ def _render_mermaid_blocks(md_text: str, output_dir: Path) -> tuple[str, list[Pa
         try:
             # Use .cmd extension on Windows for npm-installed commands
             mmdc_cmd = "mmdc.cmd" if os.name == "nt" else "mmdc"
-            sp.run(
+            proc = sp.Popen(
                 [mmdc_cmd, "-i", str(mmd_file), "-o", str(png_file), "-b", "transparent", "-s", "4"],
-                check=True, capture_output=True, timeout=30
+                stdout=sp.PIPE, stderr=sp.PIPE
             )
+            try:
+                stdout, stderr = proc.communicate(timeout=30)
+            except sp.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                _log(f"Mermaid diagram {counter[0]} timed out after 30s - skipping")
+                return match.group(0)
+
+            if proc.returncode != 0:
+                _log(f"Mermaid diagram {counter[0]} failed: {stderr.decode()[:200]}")
+                return match.group(0)
+
             _log(f"Mermaid diagram {counter[0]} rendered: {png_file.stat().st_size} bytes")
             images.append(png_file)
             return f"![Diagram {counter[0]}]({png_file.name})"
         except FileNotFoundError:
             _log(f"mmdc not found - skipping mermaid diagram {counter[0]}")
             return match.group(0)
-        except (sp.CalledProcessError, sp.TimeoutExpired) as e:
-            _log(f"Mermaid render failed for diagram {counter[0]}: {e}")
+        except Exception as e:
+            _log(f"Mermaid render error for diagram {counter[0]}: {e}")
             return match.group(0)
 
     result = pattern.sub(replace_block, md_text)
