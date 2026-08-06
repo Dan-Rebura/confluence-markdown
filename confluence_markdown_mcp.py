@@ -241,6 +241,9 @@ def _markdown_to_storage(md_text: str, local_image_filenames: list[str] | None =
     if local_image_filenames is None:
         local_image_filenames = []
 
+    # Strip the first # heading (it becomes the page title in Confluence)
+    md_text = re.sub(r'^#\s+.+\n*', '', md_text, count=1)
+
     # Convert markdown to HTML
     html = markdown.markdown(
         md_text,
