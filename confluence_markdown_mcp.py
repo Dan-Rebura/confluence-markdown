@@ -1083,68 +1083,6 @@ def sync_project(config_path: str | None = None, confirm: bool = False) -> str:
 # --- Entry Point ---
 
 
-def migrate_frontmatter(config_path: str, strip: bool = False) -> str:
-    """Migrate frontmatter-based page state to confluence.json.
-
-    Scans all markdown files in docs_dir, extracts confluence_page_id,
-    confluence_version and confluence_homepage from frontmatter, and
-    writes them into the pages map in confluence.json.
-
-    Args:
-        config_path: Path to confluence.json.
-        strip: If True, remove confluence_* fields from file frontmatter after migration.
-    """
-    import json
-
-    cfg_file = Path(config_path)
-    if not cfg_file.exists():
-        return f"Config file not found: {cfg_file}"
-
-    config = json.loads(cfg_file.read_text(encoding="utf-8"))
-    docs_dir = config.get("docs_dir", ".")
-    docs_path = cfg_file.parent / docs_dir
-
-    if not docs_path.exists():
-        return f"docs_dir not found: {docs_path}"
-
-    pages_state = config.get("pages", {})
-    migrated = 0
-
-    for md_file in sorted(docs_path.rglob("*.md")):
-        metadata, body = _parse_markdown_file(md_file)
-        page_id = metadata.get("confluence_page_id")
-        if not page_id:
-            continue
-
-        rel_key = str(md_file.relative_to(docs_path)).replace("\\", "/")
-        entry = {"confluence_page_id": str(page_id)}
-
-        version = metadata.get("confluence_version")
-        if version:
-            entry["confluence_version"] = int(version)
-
-        if metadata.get("confluence_homepage"):
-            entry["confluence_homepage"] = True
-
-        pages_state[rel_key] = entry
-        migrated += 1
-
-        # Optionally strip confluence fields from frontmatter
-        if strip:
-            keys_to_remove = [k for k in metadata if k.startswith("confluence_") or k in ("source", "exported")]
-            for k in keys_to_remove:
-                del metadata[k]
-            _write_frontmatter(md_file, metadata, body)
-
-    config["pages"] = pages_state
-    cfg_file.write_text(json.dumps(config, indent=2), encoding="utf-8")
-
-    result = f"Migrated {migrated} pages to confluence.json"
-    if strip:
-        result += " (frontmatter stripped)"
-    return result
-
-
 def main():
     mcp.run()
 
