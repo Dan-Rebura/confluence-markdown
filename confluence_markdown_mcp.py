@@ -789,602 +789,6 @@ def download_page_tree(page_ref: str, confluence_url: str | None = None, output_
     return f"Tree '{root_title}': {downloaded}/{len(all_pages)} pages.\nOutput: {tree_dir.absolute()}"
 
 
-# --- Publish Tools ---
-
-
-@mcp.tool()
-def publish_page(file_path: str, space_key: str | None = None, parent_page_ref: str | None = None,
-                 title: str | None = None, confluence_url: str | None = None, confirm: bool = False) -> str:
-    """Create a new Confluence page from a local Markdown file.
-
-    Defaults to dry-run mode. Set confirm=True to actually create the page.
-    If the file already has a confluence_page_id in frontmatter, use update_page instead.
-
-    Args:
-        file_path: Path to the Markdown file to publish.
-        space_key: Confluence space key. Overrides frontmatter confluence_space_key.
-        parent_page_ref: Parent page URL or ID. Overrides frontmatter confluence_parent_id.
-        title: Page title. Overrides frontmatter title.
-        confluence_url: Confluence base URL. Falls back to env if not provided.
-        confirm: Set to True to execute the publish. Defaults to dry-run.
-    """
-    base_url = _resolve_url(confluence_url)
-    fp = Path(file_path)
-
-    if not fp.exists():
-        return f"File not found: {file_path}"
-
-    metadata, body = _parse_markdown_file(fp)
-
-    # Resolve parameters
-    page_title = title or metadata.get("title") or fp.stem
-    target_space = space_key or metadata.get("confluence_space_key")
-    parent_id = None
-    if parent_page_ref:
-        parent_id = _extract_page_id(parent_page_ref) or parent_page_ref
-    elif metadata.get("confluence_parent_id"):
-        parent_id = str(metadata["confluence_parent_id"])
-
-    # If file already has a page ID, suggest update instead
-    if metadata.get("confluence_page_id"):
-        return (f"This file already has confluence_page_id={metadata['confluence_page_id']}. "
-                f"Use update_page instead to update the existing page.")
-
-    # If flagged as homepage, update the space's existing homepage instead of creating new
-    if metadata.get("confluence_homepage"):
-        if not target_space:
-            return "Error: No space_key provided and confluence_space_key not in frontmatter."
-
-        # Fetch the space's current homepage
-        try:
-            space_data = _api_get(base_url, f"space/{target_space}", {"expand": "homepage"})
-            hp = space_data.get("homepage", {})
-            hp_id = hp.get("id")
-            if not hp_id:
-                return f"Error: Space {target_space} has no homepage set."
-        except requests.exceptions.HTTPError as e:
-            return f"Error fetching space: {e}"
-
-        # Render mermaid diagrams and find local images (keep original body for file write-back)
-        original_body = body
-        body, local_images, _mermaid_pngs = _prepare_body_for_publish(body, fp.parent)
-        image_filenames = [Path(ref).name for ref, path in local_images if path]
-        missing_images = [ref for ref, path in local_images if path is None]
-        storage_html = _markdown_to_storage(body, image_filenames)
-
-        if not confirm:
-            lines = [
-                "DRY RUN - publish_page (homepage update) preview:",
-                f"  Will update existing homepage: {hp.get('title')} (id: {hp_id})",
-                f"  Space: {target_space}",
-                f"  New title: {page_title}",
-                f"  Content: {len(storage_html)} chars of storage HTML",
-                f"  Images: {len(image_filenames)} to upload",
-            ]
-            if missing_images:
-                lines.append(f"  WARNING - missing images: {missing_images}")
-            lines.append("")
-            lines.append("Set confirm=True to execute this update.")
-            return "\n".join(lines)
-
-        # Fetch current version
-        remote = _api_get(base_url, f"content/{hp_id}", {"expand": "version"})
-        remote_version = remote.get("version", {}).get("number", 1)
-
-        payload = {
-            "type": "page",
-            "title": page_title,
-            "version": {"number": remote_version + 1},
-            "body": {"storage": {"value": storage_html, "representation": "storage"}},
-            "metadata": _FULL_WIDTH_METADATA
-        }
-
-        try:
-            result = _api_put(base_url, f"content/{hp_id}", json_data=payload)
-        except requests.exceptions.HTTPError as e:
-            return f"Failed to update homepage: {e}"
-
-        actual_version = result.get("version", {}).get("number", remote_version + 1)
-        page_url = f"{base_url}/wiki/spaces/{target_space}/pages/{hp_id}"
-
-        # Upload images
-        uploaded = 0
-        for ref, path in local_images:
-            if path and path.exists():
-                if _upload_attachment(base_url, hp_id, path):
-                    uploaded += 1
-                time.sleep(0.3)
-
-        # Update local frontmatter
-        metadata["confluence_page_id"] = hp_id
-        metadata["confluence_space_key"] = target_space
-        metadata["confluence_version"] = actual_version
-        metadata["source"] = page_url
-        _write_frontmatter(fp, metadata, original_body)
-
-        lines = [
-            f"Homepage updated: {page_title}",
-            f"  Page ID: {hp_id}",
-            f"  URL: {page_url}",
-            f"  Version: {remote_version} -> {actual_version}",
-            f"  Images uploaded: {uploaded}/{len(image_filenames)}",
-        ]
-        if missing_images:
-            lines.append(f"  WARNING - missing images: {missing_images}")
-        return "\n".join(lines)
-
-    # Validate
-    if not target_space:
-        return "Error: No space_key provided and confluence_space_key not in frontmatter."
-
-    # Render mermaid diagrams and find local images (keep original body for file write-back)
-    original_body = body
-    body, local_images, _mermaid_pngs = _prepare_body_for_publish(body, fp.parent)
-    image_filenames = [Path(ref).name for ref, path in local_images if path]
-    missing_images = [ref for ref, path in local_images if path is None]
-
-    # Convert to storage format
-    storage_html = _markdown_to_storage(body, image_filenames)
-
-    # Dry-run report
-    if not confirm:
-        lines = [
-            "DRY RUN - publish_page preview:",
-            f"  Title: {page_title}",
-            f"  Space: {target_space}",
-            f"  Parent: {parent_id or '(space root)'}",
-            f"  Content: {len(storage_html)} chars of storage HTML",
-            f"  Images: {len(image_filenames)} to upload",
-        ]
-        if missing_images:
-            lines.append(f"  WARNING - missing images: {missing_images}")
-        lines.append("")
-        lines.append("Set confirm=True to execute this publish.")
-        return "\n".join(lines)
-
-    # Execute publish
-    payload = {
-        "type": "page",
-        "title": page_title,
-        "space": {"key": target_space},
-        "body": {"storage": {"value": storage_html, "representation": "storage"}},
-        "metadata": _FULL_WIDTH_METADATA
-    }
-    if parent_id:
-        payload["ancestors"] = [{"id": parent_id}]
-
-    try:
-        result = _api_post(base_url, "content", json_data=payload)
-    except requests.exceptions.HTTPError as e:
-        return f"Failed to create page: {e}"
-
-    new_page_id = result.get("id")
-    new_version = result.get("version", {}).get("number", 1)
-    page_url = f"{base_url}/wiki/spaces/{target_space}/pages/{new_page_id}"
-
-    # Upload images
-    uploaded = 0
-    for ref, path in local_images:
-        if path and path.exists():
-            if _upload_attachment(base_url, new_page_id, path):
-                uploaded += 1
-            time.sleep(0.3)
-
-    # Update local frontmatter
-    metadata["confluence_page_id"] = new_page_id
-    metadata["confluence_space_key"] = target_space
-    metadata["confluence_version"] = new_version
-    metadata["source"] = page_url
-    if parent_id:
-        metadata["confluence_parent_id"] = parent_id
-    _write_frontmatter(fp, metadata, original_body)
-
-    lines = [
-        f"Published: {page_title}",
-        f"  Page ID: {new_page_id}",
-        f"  URL: {page_url}",
-        f"  Version: {new_version}",
-        f"  Images uploaded: {uploaded}/{len(image_filenames)}",
-    ]
-    if missing_images:
-        lines.append(f"  WARNING - missing images: {missing_images}")
-    return "\n".join(lines)
-
-
-@mcp.tool()
-def update_page(file_path: str, page_ref: str | None = None, title: str | None = None,
-                confluence_url: str | None = None, confirm: bool = False) -> str:
-    """Update an existing Confluence page from a local Markdown file.
-
-    Defaults to dry-run mode. Set confirm=True to actually update.
-    Checks version conflicts before updating.
-
-    Args:
-        file_path: Path to the Markdown file.
-        page_ref: Page URL or ID. Overrides frontmatter confluence_page_id.
-        title: Page title override. Defaults to frontmatter title.
-        confluence_url: Confluence base URL. Falls back to env if not provided.
-        confirm: Set to True to execute the update. Defaults to dry-run.
-    """
-    base_url = _resolve_url(confluence_url)
-    fp = Path(file_path)
-
-    if not fp.exists():
-        return f"File not found: {file_path}"
-
-    metadata, body = _parse_markdown_file(fp)
-
-    # Resolve page ID
-    page_id = None
-    if page_ref:
-        page_id = _extract_page_id(page_ref) or page_ref
-    elif metadata.get("confluence_page_id"):
-        page_id = str(metadata["confluence_page_id"])
-
-    if not page_id:
-        return "Error: No page_ref provided and confluence_page_id not in frontmatter."
-
-    page_title = title or metadata.get("title") or fp.stem
-    local_version = metadata.get("confluence_version")
-
-    # Fetch remote page to check version
-    try:
-        remote_page = _api_get(base_url, f"content/{page_id}", {"expand": "version,space"})
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 404:
-            return f"Page {page_id} not found on Confluence."
-        return f"Error fetching page: {e}"
-
-    remote_version = remote_page.get("version", {}).get("number")
-    space_key = remote_page.get("space", {}).get("key")
-
-    # Version conflict check
-    if local_version and remote_version and int(local_version) != int(remote_version):
-        return (f"Version conflict: local has version {local_version}, "
-                f"remote has version {remote_version}. "
-                f"Download the latest version before updating.")
-
-    # Render mermaid diagrams and find local images (keep original body for file write-back)
-    original_body = body
-    body, local_images, _mermaid_pngs = _prepare_body_for_publish(body, fp.parent)
-    image_filenames = [Path(ref).name for ref, path in local_images if path]
-    missing_images = [ref for ref, path in local_images if path is None]
-
-    # Convert to storage format
-    storage_html = _markdown_to_storage(body, image_filenames)
-
-    new_version = (remote_version or 0) + 1
-
-    # Dry-run report
-    if not confirm:
-        lines = [
-            "DRY RUN - update_page preview:",
-            f"  Page ID: {page_id}",
-            f"  Title: {page_title}",
-            f"  Space: {space_key}",
-            f"  Current version: {remote_version} -> {new_version}",
-            f"  Content: {len(storage_html)} chars of storage HTML",
-            f"  Images: {len(image_filenames)} to upload",
-        ]
-        if missing_images:
-            lines.append(f"  WARNING - missing images: {missing_images}")
-        lines.append("")
-        lines.append("Set confirm=True to execute this update.")
-        return "\n".join(lines)
-
-    # Execute update
-    payload = {
-        "type": "page",
-        "title": page_title,
-        "version": {"number": new_version},
-        "body": {"storage": {"value": storage_html, "representation": "storage"}},
-        "metadata": _FULL_WIDTH_METADATA
-    }
-
-    try:
-        result = _api_put(base_url, f"content/{page_id}", json_data=payload)
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 409:
-            return (f"Conflict (409): The page was modified on Confluence since your last download. "
-                    f"Download the latest version and merge your changes.")
-        return f"Failed to update page: {e}"
-
-    actual_version = result.get("version", {}).get("number", new_version)
-    page_url = f"{base_url}/wiki/spaces/{space_key}/pages/{page_id}"
-
-    # Upload images
-    uploaded = 0
-    for ref, path in local_images:
-        if path and path.exists():
-            if _upload_attachment(base_url, page_id, path):
-                uploaded += 1
-            time.sleep(0.3)
-
-    # Update local frontmatter
-    metadata["confluence_page_id"] = page_id
-    metadata["confluence_version"] = actual_version
-    metadata["confluence_space_key"] = space_key
-    metadata["source"] = page_url
-    _write_frontmatter(fp, metadata, original_body)
-
-    lines = [
-        f"Updated: {page_title}",
-        f"  Page ID: {page_id}",
-        f"  URL: {page_url}",
-        f"  Version: {remote_version} -> {actual_version}",
-        f"  Images uploaded: {uploaded}/{len(image_filenames)}",
-    ]
-    if missing_images:
-        lines.append(f"  WARNING - missing images: {missing_images}")
-    return "\n".join(lines)
-
-
-@mcp.tool()
-def publish_tree(directory_path: str, space_key: str, parent_page_ref: str | None = None,
-                 confluence_url: str | None = None, confirm: bool = False,
-                 exclude_dirs: list[str] | None = None) -> str:
-    """Publish a directory of Markdown files as a hierarchy of Confluence pages.
-
-    Folder structure maps to page hierarchy. Defaults to dry-run mode.
-
-    Args:
-        directory_path: Path to the directory containing Markdown files.
-        space_key: Confluence space key to publish into.
-        parent_page_ref: Parent page URL or ID for the root level. Optional.
-        confluence_url: Confluence base URL. Falls back to env if not provided.
-        confirm: Set to True to execute. Defaults to dry-run.
-        exclude_dirs: List of folder names to exclude from sync.
-    """
-    base_url = _resolve_url(confluence_url)
-    root_dir = Path(directory_path)
-    excluded = set(exclude_dirs or [])
-
-    if not root_dir.exists() or not root_dir.is_dir():
-        return f"Directory not found: {directory_path}"
-
-    # Discover all .md files, excluding specified directories
-    # Normalise separators so config works on both Windows and Mac
-    normalised_excludes = [ex.replace("\\", "/") for ex in excluded]
-    md_files = sorted(
-        f for f in root_dir.rglob("*.md")
-        if not any(
-            str(f.relative_to(root_dir)).replace("\\", "/").startswith(ex)
-            for ex in normalised_excludes
-        )
-    )
-    if not md_files:
-        return f"No Markdown files found in {directory_path}"
-
-    parent_id = None
-    if parent_page_ref:
-        parent_id = _extract_page_id(parent_page_ref) or parent_page_ref
-
-    # Identify subfolders that will become parent pages
-    subdirs = sorted(set(
-        str(md_file.relative_to(root_dir).parent)
-        for md_file in md_files
-        if str(md_file.relative_to(root_dir).parent) != "."
-    ))
-
-    # Build tree structure for reporting
-    creates = []
-    updates = []
-
-    for md_file in md_files:
-        metadata, body = _parse_markdown_file(md_file)
-        rel_path = md_file.relative_to(root_dir)
-        page_title = metadata.get("title") or md_file.stem
-
-        if metadata.get("confluence_page_id"):
-            updates.append({"file": str(rel_path), "title": page_title, "id": metadata["confluence_page_id"]})
-        else:
-            creates.append({"file": str(rel_path), "title": page_title})
-
-    # Dry-run report
-    if not confirm:
-        lines = [
-            "DRY RUN - publish_tree preview:",
-            f"  Directory: {root_dir.absolute()}",
-            f"  Space: {space_key}",
-            f"  Parent: {parent_id or '(space root)'}",
-            f"  Total files: {len(md_files)}",
-            f"  Folder pages to create: {len(subdirs)}",
-            f"  File pages to create: {len(creates)}",
-            f"  File pages to update: {len(updates)}",
-        ]
-        if subdirs:
-            lines.append("")
-            lines.append("Folder parent pages:")
-            for sd in subdirs:
-                lines.append(f"    [folder] {sd}")
-        lines.append("")
-        lines.append("Creates:")
-        for c in creates[:20]:
-            lines.append(f"    + {c['file']} -> \"{c['title']}\"")
-        if len(creates) > 20:
-            lines.append(f"    ... and {len(creates) - 20} more")
-        lines.append("")
-        lines.append("Updates:")
-        for u in updates[:20]:
-            lines.append(f"    ~ {u['file']} -> \"{u['title']}\" (id: {u['id']})")
-        if len(updates) > 20:
-            lines.append(f"    ... and {len(updates) - 20} more")
-        lines.append("")
-        lines.append("Set confirm=True to execute this publish.")
-        return "\n".join(lines)
-
-    # Execute: process files in directory order (parents before children)
-    published = 0
-    updated = 0
-    errors = 0
-    # Track page IDs by relative directory path for parent resolution
-    dir_page_map: dict[str, str] = {}
-    if parent_id:
-        dir_page_map["."] = parent_id
-
-    # First pass: create parent pages for each subfolder
-    subdirs = sorted(set(
-        str(md_file.relative_to(root_dir).parent)
-        for md_file in md_files
-        if str(md_file.relative_to(root_dir).parent) != "."
-    ))
-
-    for subdir in subdirs:
-        parts = Path(subdir).parts
-        # Build each level of the path, creating parent pages as needed
-        for i in range(len(parts)):
-            dir_key = str(Path(*parts[:i+1]))
-            if dir_key in dir_page_map:
-                continue  # Already created
-
-            folder_name = parts[i]
-            # Determine this folder's parent
-            if i == 0:
-                folder_parent_id = dir_page_map.get(".", parent_id)
-            else:
-                parent_dir_key = str(Path(*parts[:i]))
-                folder_parent_id = dir_page_map.get(parent_dir_key, parent_id)
-
-            # Create a parent page for this folder
-            _log(f"Creating folder page: {folder_name}")
-            folder_payload = {
-                "type": "page",
-                "title": folder_name,
-                "space": {"key": space_key},
-                "body": {"storage": {
-                    "value": f"<p>This page contains sub-pages for: <strong>{folder_name}</strong></p>",
-                    "representation": "storage"
-                }},
-                "metadata": _FULL_WIDTH_METADATA
-            }
-            if folder_parent_id:
-                folder_payload["ancestors"] = [{"id": folder_parent_id}]
-
-            try:
-                result = _api_post(base_url, "content", json_data=folder_payload)
-                folder_page_id = result.get("id")
-                dir_page_map[dir_key] = folder_page_id
-                published += 1
-                time.sleep(0.5)
-            except Exception:
-                errors += 1
-
-    # Second pass: publish/update each markdown file under its folder's parent page
-    for md_file in md_files:
-        metadata, body = _parse_markdown_file(md_file)
-        original_body = body
-        rel_path = md_file.relative_to(root_dir)
-        page_title = metadata.get("title") or md_file.stem
-        rel_dir = str(rel_path.parent)
-
-        # Determine parent: use the folder's page, or the root parent
-        file_parent_id = dir_page_map.get(rel_dir, dir_page_map.get(".", parent_id))
-
-        try:
-            if metadata.get("confluence_page_id"):
-                # Update existing
-                page_id = str(metadata["confluence_page_id"])
-                _log(f"Updating: {page_title} (id: {page_id})")
-                remote = _api_get(base_url, f"content/{page_id}", {"expand": "version"})
-                remote_version = remote.get("version", {}).get("number", 0)
-
-                body, local_images, _ = _prepare_body_for_publish(body, md_file.parent)
-                image_filenames = [Path(ref).name for ref, path in local_images if path]
-                storage_html = _markdown_to_storage(body, image_filenames)
-
-                payload = {
-                    "type": "page", "title": page_title,
-                    "version": {"number": remote_version + 1},
-                    "body": {"storage": {"value": storage_html, "representation": "storage"}},
-                    "metadata": _FULL_WIDTH_METADATA
-                }
-                result = _api_put(base_url, f"content/{page_id}", json_data=payload)
-                new_ver = result.get("version", {}).get("number", remote_version + 1)
-
-                for ref, path in local_images:
-                    if path and path.exists():
-                        _upload_attachment(base_url, page_id, path)
-
-                metadata["confluence_version"] = new_ver
-                _write_frontmatter(md_file, metadata, original_body)
-                updated += 1
-
-            else:
-                # Create new
-                body, local_images, _ = _prepare_body_for_publish(body, md_file.parent)
-                image_filenames = [Path(ref).name for ref, path in local_images if path]
-                storage_html = _markdown_to_storage(body, image_filenames)
-
-                # Handle homepage flag: update existing homepage instead of creating
-                if metadata.get("confluence_homepage"):
-                    _log(f"Updating homepage: {page_title}")
-                    try:
-                        space_data = _api_get(base_url, f"space/{space_key}", {"expand": "homepage"})
-                        hp_id = space_data.get("homepage", {}).get("id")
-                        if hp_id:
-                            remote = _api_get(base_url, f"content/{hp_id}", {"expand": "version"})
-                            hp_version = remote.get("version", {}).get("number", 1)
-                            payload = {
-                                "type": "page", "title": page_title,
-                                "version": {"number": hp_version + 1},
-                                "body": {"storage": {"value": storage_html, "representation": "storage"}},
-                                "metadata": _FULL_WIDTH_METADATA
-                            }
-                            result = _api_put(base_url, f"content/{hp_id}", json_data=payload)
-                            new_ver = result.get("version", {}).get("number", hp_version + 1)
-
-                            for ref, path in local_images:
-                                if path and path.exists():
-                                    _upload_attachment(base_url, hp_id, path)
-
-                            metadata["confluence_page_id"] = hp_id
-                            metadata["confluence_space_key"] = space_key
-                            metadata["confluence_version"] = new_ver
-                            _write_frontmatter(md_file, metadata, original_body)
-                            updated += 1
-                            time.sleep(0.5)
-                            continue
-                    except Exception as e:
-                        _log(f"ERROR updating homepage: {e}")
-                        errors += 1
-                        continue
-
-                _log(f"Publishing: {page_title}")
-
-                payload = {
-                    "type": "page", "title": page_title,
-                    "space": {"key": space_key},
-                    "body": {"storage": {"value": storage_html, "representation": "storage"}},
-                    "metadata": _FULL_WIDTH_METADATA
-                }
-                if file_parent_id:
-                    payload["ancestors"] = [{"id": file_parent_id}]
-
-                result = _api_post(base_url, "content", json_data=payload)
-                new_page_id = result.get("id")
-                new_ver = result.get("version", {}).get("number", 1)
-
-                for ref, path in local_images:
-                    if path and path.exists():
-                        _upload_attachment(base_url, new_page_id, path)
-
-                metadata["confluence_page_id"] = new_page_id
-                metadata["confluence_space_key"] = space_key
-                metadata["confluence_version"] = new_ver
-                if file_parent_id:
-                    metadata["confluence_parent_id"] = file_parent_id
-                _write_frontmatter(md_file, metadata, original_body)
-                published += 1
-
-            time.sleep(0.5)
-
-        except Exception as e:
-            errors += 1
-            _log(f"ERROR: {page_title} - {e}")
-
-    _log(f"Tree complete: {published} created, {updated} updated, {errors} errors")
-    return f"Tree publish complete: {published} created, {updated} updated, {errors} errors."
-
 
 # --- Project Sync ---
 
@@ -1393,12 +797,10 @@ def _extract_title_from_md(file_path: Path) -> str:
     """Extract the page title from a markdown file. Uses first # heading or filename."""
     try:
         content = file_path.read_text(encoding="utf-8")
-        # Skip frontmatter if present
         if content.startswith("---"):
             end = content.find("---", 3)
             if end != -1:
                 content = content[end + 3:]
-        # Find first # heading
         match = re.search(r'^#\s+(.+)$', content, re.MULTILINE)
         if match:
             return match.group(1).strip()
@@ -1414,39 +816,20 @@ def sync_project(config_path: str | None = None, confirm: bool = False) -> str:
     Page state (IDs, versions) is stored in confluence.json under a "pages" key.
     Markdown files are not modified.
 
-    Config file format (confluence.json):
-    {
-        "space_key": "ECM",
-        "confluence_url": "https://rebura.atlassian.net",
-        "docs_dir": "Design Documents",
-        "parent_page_id": "1915061323",
-        "exclude_dirs": ["Archive"],
-        "pages": {
-            "file.md": {"confluence_page_id": "123", "confluence_version": 2},
-            "HLDs/design.md": {"confluence_page_id": "456", "confluence_version": 1, "confluence_homepage": true}
-        }
-    }
-
-    Defaults to dry-run mode. Set confirm=True to execute.
-
     Args:
         config_path: Path to confluence.json. Defaults to ./confluence.json in cwd.
         confirm: Set to True to execute the sync. Defaults to dry-run.
     """
     import json
 
-    # Find config file
     if config_path:
         cfg_file = Path(config_path)
     else:
         cfg_file = Path.cwd() / "confluence.json"
 
     if not cfg_file.exists():
-        return (f"Config file not found: {cfg_file}\n"
-                f"Create a confluence.json with: space_key, docs_dir, "
-                f"and optionally confluence_url, parent_page_id, exclude_dirs and pages.")
+        return f"Config file not found: {cfg_file}"
 
-    # Load config
     try:
         config = json.loads(cfg_file.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
@@ -1464,14 +847,12 @@ def sync_project(config_path: str | None = None, confirm: bool = False) -> str:
 
     base_url = _resolve_url(confluence_url)
 
-    # Resolve docs_dir relative to the config file location
     docs_path = cfg_file.parent / docs_dir
     if not docs_path.exists() or not docs_path.is_dir():
         return f"Error: docs_dir '{docs_dir}' not found at {docs_path}"
 
     # Discover markdown files with exclusions
-    excluded = set(exclude_dirs)
-    normalised_excludes = [ex.replace("\\", "/") for ex in excluded]
+    normalised_excludes = [ex.replace("\\", "/") for ex in exclude_dirs]
     md_files = sorted(
         f for f in docs_path.rglob("*.md")
         if not any(
@@ -1500,32 +881,30 @@ def sync_project(config_path: str | None = None, confirm: bool = False) -> str:
         else:
             creates.append({"file": md_file, "key": rel_key, "title": title, "info": page_info})
 
-    _log(f"Syncing: space={space_key}, docs={docs_path}, "
-         f"homepage={len(homepage_files)}, updates={len(updates)}, creates={len(creates)}")
+    _log(f"Syncing: space={space_key}, homepage={len(homepage_files)}, updates={len(updates)}, creates={len(creates)}")
+
+    # Identify subfolders
+    subdirs = sorted(set(
+        str(md_file.relative_to(docs_path).parent).replace("\\", "/")
+        for md_file in md_files
+        if str(md_file.relative_to(docs_path).parent) != "."
+    ))
 
     # Dry-run report
     if not confirm:
-        # Identify subfolders
-        subdirs = sorted(set(
-            str(md_file.relative_to(docs_path).parent).replace("\\", "/")
-            for md_file in md_files
-            if str(md_file.relative_to(docs_path).parent) != "."
-        ))
-
         lines = [
             "DRY RUN - sync_project preview:",
-            f"  Directory: {docs_path.absolute()}",
             f"  Space: {space_key}",
             f"  Parent: {parent_page_id or '(space root)'}",
             f"  Total files: {len(md_files)}",
-            f"  Folder pages to create: {len(subdirs)}",
-            f"  Homepage updates: {len(homepage_files)}",
-            f"  Page updates: {len(updates)}",
-            f"  New pages: {len(creates)}",
+            f"  Folder pages: {len(subdirs)}",
+            f"  Homepage: {len(homepage_files)}",
+            f"  Updates: {len(updates)}",
+            f"  Creates: {len(creates)}",
         ]
         if subdirs:
             lines.append("")
-            lines.append("Folder parent pages:")
+            lines.append("Folders:")
             for sd in subdirs:
                 lines.append(f"    [folder] {sd}")
         if homepage_files:
@@ -1533,95 +912,70 @@ def sync_project(config_path: str | None = None, confirm: bool = False) -> str:
             lines.append("Homepage:")
             for h in homepage_files:
                 lines.append(f"    * {h['key']} -> \"{h['title']}\"")
+        if updates:
+            lines.append("")
+            lines.append("Updates:")
+            for u in updates[:20]:
+                lines.append(f"    ~ {u['key']} -> \"{u['title']}\"")
+            if len(updates) > 20:
+                lines.append(f"    ... and {len(updates) - 20} more")
+        if creates:
+            lines.append("")
+            lines.append("Creates:")
+            for c in creates[:20]:
+                lines.append(f"    + {c['key']} -> \"{c['title']}\"")
+            if len(creates) > 20:
+                lines.append(f"    ... and {len(creates) - 20} more")
         lines.append("")
-        lines.append("Updates:")
-        for u in updates[:20]:
-            lines.append(f"    ~ {u['key']} -> \"{u['title']}\" (id: {u['info']['confluence_page_id']})")
-        if len(updates) > 20:
-            lines.append(f"    ... and {len(updates) - 20} more")
-        lines.append("")
-        lines.append("Creates:")
-        for c in creates[:20]:
-            lines.append(f"    + {c['key']} -> \"{c['title']}\"")
-        if len(creates) > 20:
-            lines.append(f"    ... and {len(creates) - 20} more")
-        lines.append("")
-        lines.append("Set confirm=True to execute this sync.")
+        lines.append("Set confirm=True to execute.")
         return "\n".join(lines)
 
     # --- Execute ---
     published = 0
     updated = 0
     errors = 0
-
-    # Track folder parent pages
     dir_page_map: dict[str, str] = {}
     if parent_page_id:
         dir_page_map["."] = parent_page_id
 
-    # Create folder parent pages for subfolders
-    subdirs = sorted(set(
-        str(md_file.relative_to(docs_path).parent).replace("\\", "/")
-        for md_file in md_files
-        if str(md_file.relative_to(docs_path).parent) != "."
-    ))
-
+    # Create folder parent pages
     for subdir in subdirs:
         parts = subdir.split("/")
         for i in range(len(parts)):
             dir_key = "/".join(parts[:i+1])
             if dir_key in dir_page_map:
                 continue
-
             folder_name = parts[i]
-            if i == 0:
-                folder_parent_id = dir_page_map.get(".", parent_page_id)
-            else:
-                parent_dir_key = "/".join(parts[:i])
-                folder_parent_id = dir_page_map.get(parent_dir_key, parent_page_id)
-
+            folder_parent_id = dir_page_map.get("/".join(parts[:i]) if i > 0 else ".", parent_page_id)
             _log(f"Creating folder page: {folder_name}")
-            folder_payload = {
-                "type": "page",
-                "title": folder_name,
-                "space": {"key": space_key},
-                "body": {"storage": {
-                    "value": f"<p>This page contains sub-pages for: <strong>{folder_name}</strong></p>",
-                    "representation": "storage"
-                }},
-                "metadata": _FULL_WIDTH_METADATA
-            }
-            if folder_parent_id:
-                folder_payload["ancestors"] = [{"id": folder_parent_id}]
-
             try:
-                result = _api_post(base_url, "content", json_data=folder_payload)
+                result = _api_post(base_url, "content", json_data={
+                    "type": "page", "title": folder_name,
+                    "space": {"key": space_key},
+                    "body": {"storage": {"value": f"<p><strong>{folder_name}</strong></p>", "representation": "storage"}},
+                    "metadata": _FULL_WIDTH_METADATA,
+                    **({"ancestors": [{"id": folder_parent_id}]} if folder_parent_id else {})
+                })
                 dir_page_map[dir_key] = result.get("id")
                 published += 1
                 time.sleep(0.5)
             except Exception as e:
-                _log(f"ERROR creating folder page {folder_name}: {e}")
+                _log(f"ERROR folder {folder_name}: {e}")
                 errors += 1
 
-    # Process homepage files
+    # Process homepage
     for item in homepage_files:
-        md_file = item["file"]
-        rel_key = item["key"]
-        page_title = item["title"]
-        page_info = item["info"]
-
+        md_file, rel_key, page_title = item["file"], item["key"], item["title"]
         try:
             body = md_file.read_text(encoding="utf-8")
-            original_body = body
             body, local_images, _ = _prepare_body_for_publish(body, md_file.parent)
             image_filenames = [Path(ref).name for ref, path in local_images if path]
             storage_html = _markdown_to_storage(body, image_filenames)
 
-            # Get space homepage
             space_data = _api_get(base_url, f"space/{space_key}", {"expand": "homepage"})
             hp_id = space_data.get("homepage", {}).get("id")
             if not hp_id:
-                _log(f"ERROR: Space {space_key} has no homepage")
+                _log(f"ERROR: No homepage in space {space_key}")
                 errors += 1
                 continue
 
@@ -1629,40 +983,29 @@ def sync_project(config_path: str | None = None, confirm: bool = False) -> str:
             hp_version = remote.get("version", {}).get("number", 1)
 
             _log(f"Updating homepage: {page_title}")
-            payload = {
+            result = _api_put(base_url, f"content/{hp_id}", json_data={
                 "type": "page", "title": page_title,
                 "version": {"number": hp_version + 1},
                 "body": {"storage": {"value": storage_html, "representation": "storage"}},
                 "metadata": _FULL_WIDTH_METADATA
-            }
-            result = _api_put(base_url, f"content/{hp_id}", json_data=payload)
+            })
             new_ver = result.get("version", {}).get("number", hp_version + 1)
 
             for ref, path in local_images:
                 if path and path.exists():
                     _upload_attachment(base_url, hp_id, path)
 
-            # Update state
-            pages_state[rel_key] = {
-                "confluence_page_id": hp_id,
-                "confluence_version": new_ver,
-                "confluence_homepage": True
-            }
+            pages_state[rel_key] = {"confluence_page_id": hp_id, "confluence_version": new_ver, "confluence_homepage": True}
             updated += 1
             time.sleep(0.5)
-
         except Exception as e:
             _log(f"ERROR: {page_title} - {e}")
             errors += 1
 
     # Process updates
     for item in updates:
-        md_file = item["file"]
-        rel_key = item["key"]
-        page_title = item["title"]
-        page_info = item["info"]
-        page_id = str(page_info["confluence_page_id"])
-
+        md_file, rel_key, page_title = item["file"], item["key"], item["title"]
+        page_id = str(item["info"]["confluence_page_id"])
         try:
             body = md_file.read_text(encoding="utf-8")
             body, local_images, _ = _prepare_body_for_publish(body, md_file.parent)
@@ -1673,37 +1016,29 @@ def sync_project(config_path: str | None = None, confirm: bool = False) -> str:
             remote_version = remote.get("version", {}).get("number", 0)
 
             _log(f"Updating: {page_title} (id: {page_id})")
-            payload = {
+            result = _api_put(base_url, f"content/{page_id}", json_data={
                 "type": "page", "title": page_title,
                 "version": {"number": remote_version + 1},
                 "body": {"storage": {"value": storage_html, "representation": "storage"}},
                 "metadata": _FULL_WIDTH_METADATA
-            }
-            result = _api_put(base_url, f"content/{page_id}", json_data=payload)
+            })
             new_ver = result.get("version", {}).get("number", remote_version + 1)
 
             for ref, path in local_images:
                 if path and path.exists():
                     _upload_attachment(base_url, page_id, path)
 
-            pages_state[rel_key] = {
-                "confluence_page_id": page_id,
-                "confluence_version": new_ver
-            }
+            pages_state[rel_key] = {"confluence_page_id": page_id, "confluence_version": new_ver}
             updated += 1
             time.sleep(0.5)
-
         except Exception as e:
             _log(f"ERROR: {page_title} - {e}")
             errors += 1
 
     # Process creates
     for item in creates:
-        md_file = item["file"]
-        rel_key = item["key"]
-        page_title = item["title"]
+        md_file, rel_key, page_title = item["file"], item["key"], item["title"]
         rel_dir = str(md_file.relative_to(docs_path).parent).replace("\\", "/")
-
         file_parent_id = dir_page_map.get(rel_dir, dir_page_map.get(".", parent_page_id))
 
         try:
@@ -1730,18 +1065,14 @@ def sync_project(config_path: str | None = None, confirm: bool = False) -> str:
                 if path and path.exists():
                     _upload_attachment(base_url, new_page_id, path)
 
-            pages_state[rel_key] = {
-                "confluence_page_id": new_page_id,
-                "confluence_version": new_ver
-            }
+            pages_state[rel_key] = {"confluence_page_id": new_page_id, "confluence_version": new_ver}
             published += 1
             time.sleep(0.5)
-
         except Exception as e:
             _log(f"ERROR: {page_title} - {e}")
             errors += 1
 
-    # Save updated state back to confluence.json
+    # Save state
     config["pages"] = pages_state
     cfg_file.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
