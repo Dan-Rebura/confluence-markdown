@@ -877,6 +877,13 @@ def sync_project(config_path: str | None = None, confirm: bool = False) -> str:
         page_info = pages_state.get(rel_key, {})
         title = _extract_title_from_md(md_file)
 
+        # Auto-detect homepage: "Project Overview.md" in root docs_dir on first sync
+        if rel_key == "Project Overview.md" and not page_info and not any(
+            p.get("confluence_homepage") for p in pages_state.values()
+        ):
+            page_info["confluence_homepage"] = True
+            pages_state[rel_key] = page_info
+
         if page_info.get("confluence_homepage"):
             homepage_files.append({"file": md_file, "key": rel_key, "title": title, "info": page_info})
         elif page_info.get("confluence_page_id"):
